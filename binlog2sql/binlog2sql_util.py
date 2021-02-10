@@ -99,6 +99,8 @@ def parse_args():
                         help='Flashback data to start_position of start_file', default=False)
     parser.add_argument('--back-interval', dest='back_interval', type=float, default=1.0,
                         help="Sleep time between chunks of 1000 rollback sql. set it to 0 if do not need sleep")
+    parser.add_argument('--minimal', dest='minimal', action='store_true', default=False,
+                        help="Skip unchanged fields in row-based replication UPDATE statements")
     return parser
 
 
@@ -164,7 +166,7 @@ def event_type(event):
     return t
 
 
-def concat_sql_from_binlog_event(cursor, binlog_event, row=None, e_start_pos=None, flashback=False, no_pk=False):
+def concat_sql_from_binlog_event(cursor, binlog_event, row=None, e_start_pos=None, flashback=False, no_pk=False, minimal=False):
     if flashback and no_pk:
         raise ValueError('only one of flashback or no_pk can be True')
     if not (isinstance(binlog_event, WriteRowsEvent) or isinstance(binlog_event, UpdateRowsEvent)
@@ -174,7 +176,7 @@ def concat_sql_from_binlog_event(cursor, binlog_event, row=None, e_start_pos=Non
     sql = ''
     if isinstance(binlog_event, WriteRowsEvent) or isinstance(binlog_event, UpdateRowsEvent) \
             or isinstance(binlog_event, DeleteRowsEvent):
-        pattern = generate_sql_pattern(binlog_event, row=row, flashback=flashback, no_pk=no_pk)
+        pattern = generate_sql_pattern(binlog_event, row=row, flashback=flashback, no_pk=no_pk, minimal=minimal)
         sql = cursor.mogrify(pattern['template'], pattern['values'])
         time = datetime.datetime.fromtimestamp(binlog_event.timestamp)
         sql += ' #start %s end %s time %s' % (e_start_pos, binlog_event.packet.log_pos, time)
@@ -187,7 +189,7 @@ def concat_sql_from_binlog_event(cursor, binlog_event, row=None, e_start_pos=Non
     return sql
 
 
-def generate_sql_pattern(binlog_event, row=None, flashback=False, no_pk=False):
+def generate_sql_pattern(binlog_event, row=None, flashback=False, no_pk=False, minimal=False):
     template = ''
     values = []
     if flashback is True:
@@ -231,6 +233,8 @@ def generate_sql_pattern(binlog_event, row=None, flashback=False, no_pk=False):
                 binlog_event.schema, binlog_event.table, ' AND '.join(map(compare_items, row['values'].items())))
             values = map(fix_object, row['values'].values())
         elif isinstance(binlog_event, UpdateRowsEvent):
+            if minimal:
+                row['after_values'] = {k: v for k, v in row['after_values'].items() if row['before_values'][k] != v}
             template = 'UPDATE `{0}`.`{1}` SET {2} WHERE {3} LIMIT 1;'.format(
                 binlog_event.schema, binlog_event.table,
                 ', '.join(['`%s`=%%s' % k for k in row['after_values'].keys()]),
